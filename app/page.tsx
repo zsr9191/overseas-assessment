@@ -2,10 +2,21 @@
 
 import { FormEvent, useState } from "react";
 
-type AssessResponse = {
-  report?: string;
+type AssessErrorResponse = {
   error?: string;
+  report?: string;
 };
+
+async function readErrorMessage(response: Response) {
+  const raw = await response.text();
+
+  try {
+    const data = JSON.parse(raw) as AssessErrorResponse;
+    return data.error || "生成评估报告失败，请稍后重试。";
+  } catch {
+    return "生成超时，请稍后重试";
+  }
+}
 
 export default function Home() {
   const [brief, setBrief] = useState("");
@@ -18,6 +29,7 @@ export default function Home() {
     if (!inputText || loading) return;
 
     setLoading(true);
+    setReport("");
 
     try {
       const response = await fetch("/api/assess", {
@@ -26,21 +38,57 @@ export default function Home() {
         body: JSON.stringify({ inputText }),
       });
 
-      let data: AssessResponse = {};
-      try {
-        data = (await response.json()) as AssessResponse;
-      } catch {
-        throw new Error("服务器返回了无法解析的响应。");
+      const contentType = response.headers.get("content-type") ?? "";
+
+      if (!response.ok || contentType.includes("text/html")) {
+        throw new Error(await readErrorMessage(response));
       }
 
-      if (!response.ok || !data.report) {
-        throw new Error(data.error || "生成评估报告失败，请稍后重试。");
+      if (contentType.includes("application/json")) {
+        try {
+          const data = (await response.json()) as AssessErrorResponse;
+          if (!data.report) {
+            throw new Error(data.error || "生成评估报告失败，请稍后重试。");
+          }
+          setReport(data.report);
+          return;
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+            throw new Error("生成超时，请稍后重试");
+          }
+          throw error;
+        }
       }
 
-      setReport(data.report);
+      if (!response.body) {
+        throw new Error("服务器未返回可读取的报告内容。");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let fullReport = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        fullReport += decoder.decode(value, { stream: true });
+        setReport(fullReport);
+      }
+
+      fullReport += decoder.decode();
+      setReport(fullReport.trim());
+
+      if (!fullReport.trim()) {
+        throw new Error("未生成有效的评估报告，请稍后重试。");
+      }
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "生成评估报告失败，请稍后重试。";
+        error instanceof SyntaxError
+          ? "生成超时，请稍后重试"
+          : error instanceof Error
+            ? error.message
+            : "生成超时，请稍后重试";
       window.alert(message);
     } finally {
       setLoading(false);
@@ -119,7 +167,7 @@ export default function Home() {
           </div>
         </form>
 
-        {report ? (
+        {loading || report ? (
           <section
             aria-live="polite"
             className="mt-8 rounded-2xl border border-zinc-200/80 bg-white p-4 shadow-sm sm:mt-10 sm:p-6 dark:border-zinc-800 dark:bg-zinc-900"
@@ -128,7 +176,7 @@ export default function Home() {
               评估报告
             </h2>
             <pre className="mt-4 whitespace-pre-wrap font-sans text-sm leading-7 text-zinc-700 dark:text-zinc-300">
-              {report}
+              {report || "正在生成..."}
             </pre>
           </section>
         ) : null}
